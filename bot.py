@@ -6,9 +6,9 @@ import threading
 from flask import Flask
 import os
 
-# --- CẤU HÌNH CỨNG (Thử dán trực tiếp token vào đây nếu lấy từ os.getenv không được) ---
-BOT_TOKEN = os.getenv("BOT_TOKEN") or "7880992388:AAHT3H8B6W3_j_U6NBy2H7eI4_4n19V01y0"
-CHAT_ID = "7346983056" 
+# --- CẤU HÌNH ---
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = str(os.getenv("CHAT_ID") or "7346983056") 
 BASE_URL_PREFIX = "https://telegra.ph/NH%E1%BA%ACN-XU-BOT-DVK-"
 
 def get_vn_time():
@@ -17,74 +17,83 @@ def get_vn_time():
 status_info = {
     "current_index": 1,
     "current_date": get_vn_time().strftime("%m-%d"),
-    "logs": "Bot đang khởi động..."
+    "total_codes": 0,
+    "last_code": "Chưa có"
 }
 
 app = Flask(__name__)
 
-def send_debug_tele(text):
-    """Hàm gửi tin nhắn có báo lỗi chi tiết ra console"""
+def send_tele(text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     try:
-        r = requests.post(url, json={'chat_id': CHAT_ID, 'text': text, 'parse_mode': 'Markdown'}, timeout=10)
-        print(f"[Telegram] Gửi tin: {r.status_code} - {r.text}")
-        return r.status_code == 200
-    except Exception as e:
-        print(f"[Telegram] Lỗi kết nối: {e}")
-        return False
+        requests.post(url, json={'chat_id': CHAT_ID, 'text': text, 'parse_mode': 'Markdown'}, timeout=10)
+    except: pass
 
 @app.route('/')
 def home():
-    return f"<h1>Bot Status</h1><p>{status_info['logs']}</p><p>Page: {status_info['current_date']}-{status_info['current_index']}</p>"
+    return f"Bot Online - Page: {status_info['current_index']}"
 
-def bot_worker():
-    sent_codes = set()
-    # Thử gửi 1 tin kiểm tra ngay khi chạy
-    send_debug_tele("🔔 **Bot bắt đầu quét mã nguồn...** Nếu bạn thấy tin này, Telegram đã OK!")
-    
+# --- LUỒNG NGHE LỆNH (SỬA LỖI Ở ĐÂY) ---
+def telegram_listener():
+    last_id = 0
+    print("--- ĐANG ĐỢI LỆNH TỪ TELEGRAM ---")
     while True:
         try:
-            now_date = get_vn_time().strftime("%m-%d")
-            if now_date != status_info["current_date"]:
-                status_info["current_date"] = now_date
-                status_info["current_index"] = 1
-                sent_codes.clear()
-
-            # DÒ TRANG: Quét từ trang hiện tại lên +10 trang nữa
-            for check_idx in range(status_info["current_index"], status_info["current_index"] + 11):
-                url = f"{BASE_URL_PREFIX}{status_info['current_date']}-{check_idx}"
-                print(f"🔍 Đang soi mã nguồn: {url}")
-                
-                try:
-                    res = requests.get(url, timeout=10)
-                    if res.status_code == 200:
-                        # Nếu tìm thấy trang mới cao hơn, cập nhật ngay
-                        if check_idx > status_info["current_index"]:
-                            status_info["current_index"] = check_idx
-                            send_debug_tele(f"📂 Đã tự động nhảy sang trang: {check_idx}")
-
-                        source = res.text
-                        # Tìm mã /nhapxu
-                        codes = re.findall(r'/nhapxu\s+([a-zA-Z0-9\-_]+)', source, re.IGNORECASE)
-                        for c in codes:
-                            cmd = f"/nhapxu {c}"
-                            if cmd not in sent_codes:
-                                if send_debug_tele(f"🎁 **Mã mới:**\n`{cmd}`"):
-                                    sent_codes.add(cmd)
+            url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?offset={last_id+1}&timeout=20"
+            response = requests.get(url, timeout=25).json()
+            
+            if "result" in response:
+                for update in response["result"]:
+                    last_id = update["update_id"]
+                    
+                    if "message" in update:
+                        msg = update["message"]
+                        text = msg.get("text", "")
+                        from_id = str(msg.get("chat", {}).get("id", ""))
                         
-                        status_info["logs"] = f"Đang quét trang {check_idx} thành công."
-                    else:
-                        # Nếu trang không tồn tại, bỏ qua dò trang này
-                        continue
-                except Exception as e:
-                    print(f"Lỗi khi tải trang {check_idx}: {e}")
-
+                        # KIỂM TRA CHÍNH XÁC ID VÀ LỆNH
+                        if from_id == CHAT_ID:
+                            if text == "/status":
+                                report = (f"🤖 **TRẠNG THÁI HIỆN TẠI**\n"
+                                          f"📅 Ngày quét: `{status_info['current_date']}`\n"
+                                          f"📂 Trang hiện tại: `{status_info['current_index']}`\n"
+                                          f"🎁 Tổng mã: `{status_info['total_codes']}`\n"
+                                          f"✨ Mã cuối: `{status_info['last_code']}`")
+                                send_tele(report)
+                            elif text == "/start":
+                                send_tele("👋 Chào sếp! Bot săn xu DVK đã sẵn sàng. Gõ /status để xem tình hình.")
         except Exception as e:
-            print(f"Lỗi worker: {e}")
-        
-        time.sleep(30) # Nghỉ 30 giây mỗi vòng lặp
+            print(f"Lỗi listener: {e}")
+        time.sleep(1)
+
+# --- LUỒNG QUÉT MÃ ---
+def bot_worker():
+    sent_codes = set()
+    while True:
+        try:
+            # Logic nhảy trang đa điểm
+            for i in range(5, -1, -1):
+                check_idx = status_info["current_index"] + i
+                url = f"{BASE_URL_PREFIX}{status_info['current_date']}-{check_idx}"
+                res = requests.get(url, timeout=10)
+                
+                if res.status_code == 200:
+                    if check_idx > status_info["current_index"]:
+                        status_info["current_index"] = check_idx
+                    
+                    codes = re.findall(r'/nhapxu\s+([a-zA-Z0-9\-_]+)', res.text, re.IGNORECASE)
+                    for c in codes:
+                        full = f"/nhapxu {c}"
+                        if full not in sent_codes:
+                            send_tele(f"🎁 **Mã mới (Trang {check_idx}):**\n`{full}`")
+                            sent_codes.add(full)
+                            status_info["total_codes"] += 1
+                            status_info["last_code"] = full
+                    break
+        except: pass
+        time.sleep(40)
 
 if __name__ == "__main__":
     threading.Thread(target=bot_worker, daemon=True).start()
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    threading.Thread(target=telegram_listener, daemon=True).start()
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
