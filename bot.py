@@ -1,5 +1,4 @@
 import requests
-from bs4 import BeautifulSoup
 import time
 import re
 from datetime import datetime, timedelta, timezone
@@ -12,11 +11,9 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = "7346983056"
 BASE_URL_PREFIX = "https://telegra.ph/NH%E1%BA%ACN-XU-BOT-DVK-"
 
-# Hàm lấy giờ Việt Nam chuẩn (GMT+7) bất kể server ở đâu
+# Lấy giờ Việt Nam chuẩn
 def get_vn_time():
-    utc_now = datetime.now(timezone.utc)
-    vn_now = utc_now + timedelta(hours=7)
-    return vn_now
+    return datetime.now(timezone.utc) + timedelta(hours=7)
 
 status_info = {
     "current_index": 1, 
@@ -29,75 +26,88 @@ app = Flask(__name__)
 
 @app.route('/')
 def index():
-    vn_now = get_vn_time().strftime("%d/%m %H:%M:%S")
-    return f"Bot DVK Online | VN Time: {vn_now} | Ngay: {status_info['current_date']} | Trang: {status_info['current_index']}"
+    vn_now = get_vn_time().strftime("%H:%M:%S")
+    return f"Bot Source Reader Online | VN: {vn_now} | Page: {status_info['current_date']}-{status_info['current_index']}"
 
 @app.route('/ping')
 def ping():
     return {"status": "alive"}, 200
 
-# --- LUỒNG QUÉT MÃ TỰ ĐỘNG ---
+# --- LOGIC QUÉT MÃ NGUỒN ---
 def bot_worker():
     sent_codes = set()
-    print(f"--- BOT STARTED | DATE: {status_info['current_date']} ---")
+    print("--- BOT SOURCE READER STARTED ---")
     
     while True:
         try:
-            # 1. Kiểm tra đổi ngày theo giờ Việt Nam
-            now_vn = get_vn_time()
-            now_date = now_vn.strftime("%m-%d")
-            
+            # 1. Tự động đổi ngày theo giờ VN
+            now_date = get_vn_time().strftime("%m-%d")
             if now_date != status_info["current_date"]:
-                print(f"Chuyển ngày: {status_info['current_date']} -> {now_date}")
                 status_info["current_date"] = now_date
                 status_info["current_index"] = 1
                 sent_codes.clear()
                 requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", 
-                             data={'chat_id': CHAT_ID, 'text': f"📅 **Hệ thống chuyển ngày VN:** {now_date}\nBắt đầu lại từ trang 1."})
+                             data={'chat_id': CHAT_ID, 'text': f"📅 Ngày mới: {now_date}. Bắt đầu quét từ trang 1."})
 
-            # 2. Quét trang hiện tại
+            # 2. Truy cập URL
             url = f"{BASE_URL_PREFIX}{status_info['current_date']}-{status_info['current_index']}"
             response = requests.get(url, timeout=10)
             
             if response.status_code == 200:
-                soup = BeautifulSoup(response.text, 'html.parser')
-                article = soup.find('article')
-                if article:
-                    content = article.get_text(separator="\n")
-                    matches = re.findall(r'(/nhapxu\s+[a-zA-Z0-9\-_]+)', content, re.IGNORECASE)
-                    for full_cmd in matches:
-                        if full_cmd not in sent_codes:
-                            requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", 
-                                         data={'chat_id': CHAT_ID, 
-                                               'text': f"🎁 **Mã mới:**\n`{full_cmd}`", 
-                                               'parse_mode': 'Markdown'})
-                            sent_codes.add(full_cmd)
-                            status_info["total_codes_found"] += 1
-                            status_info["last_code"] = full_cmd
+                # Lấy trực tiếp mã nguồn (Raw HTML)
+                html_source = response.text
+                
+                # Quét Regex trực tiếp trên Source Code
+                # Lấy cụm /nhapxu và mã phía sau (không quan tâm thẻ HTML bao quanh)
+                matches = re.findall(r'/nhapxu\s+([a-zA-Z0-9\-_]+)', html_source, re.IGNORECASE)
+                
+                for code_only in matches:
+                    full_cmd = f"/nhapxu {code_only}"
+                    if full_cmd not in sent_codes:
+                        # Gửi mã về Telegram
+                        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", 
+                                     data={
+                                         'chat_id': CHAT_ID, 
+                                         'text': f"🎁 **Tìm thấy mã trong Source:**\n`{full_cmd}`", 
+                                         'parse_mode': 'Markdown'
+                                     })
+                        sent_codes.add(full_cmd)
+                        status_info["total_codes_found"] += 1
+                        status_info["last_code"] = full_cmd
 
-            # 3. LOGIC TỰ ĐỔI TRANG (INDEX + 1)
-            # Thử kiểm tra xem trang kế tiếp có tồn tại không
+            # 3. Tự động nhảy trang (Index + 1)
             next_idx = status_info["current_index"] + 1
             next_url = f"{BASE_URL_PREFIX}{status_info['current_date']}-{next_idx}"
             
-            try:
-                next_check = requests.get(next_url, timeout=5)
-                # Nếu trang tiếp theo trả về 200 (tồn tại), nhảy index ngay
-                if next_check.status_code == 200:
-                    status_info["current_index"] = next_idx
-                    print(f"Phát hiện trang mới: {next_idx}")
-                    # Không sleep, quay lại vòng lặp để quét ngay trang mới
-                    continue 
-            except:
-                pass
-
+            # Kiểm tra nhanh trang kế tiếp
+            if requests.get(next_url, timeout=5).status_code == 200:
+                status_info["current_index"] = next_idx
+                print(f"Nhảy sang trang: {next_idx}")
+                continue # Quét luôn không chờ
+                
         except Exception as e:
             print(f"Lỗi: {e}")
         
-        # Nghỉ 60 giây nếu chưa có trang mới
         time.sleep(60)
 
 if __name__ == "__main__":
+    # Luồng xử lý lệnh /status đơn giản
+    def telegram_listener():
+        last_id = 0
+        while True:
+            try:
+                r = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?offset={last_id+1}&timeout=30").json()
+                for u in r.get("result", []):
+                    last_id = u["update_id"]
+                    if u.get("message", {}).get("text") == "/status":
+                        msg = f"📂 Đang quét: `{status_info['current_date']}-{status_info['current_index']}`\n🎁 Tổng mã: `{status_info['total_codes_found']}`"
+                        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", data={'chat_id': CHAT_ID, 'text': msg, 'parse_mode': 'Markdown'})
+            except: pass
+            time.sleep(2)
+
     threading.Thread(target=bot_worker, daemon=True).start()
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    threading.Thread(target=telegram_listener, daemon=True).start()
+    
+    # Chạy Web Server cho Render
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
+    
